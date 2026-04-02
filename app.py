@@ -1,10 +1,10 @@
 import streamlit as st
-import mysql.connector
+import sqlite3
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import date
-import os
+from pathlib import Path
 
 # ── Page Config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -20,30 +20,8 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=Source+Sans+3:wght@400;600&display=swap');
 
 html, body, [class*="css"] { font-family: 'Source Sans 3', sans-serif; }
-
 .main { background-color: #0f0e0c; }
 
-.metric-card {
-    background: linear-gradient(135deg, #1a1208, #2c1f0a);
-    border: 1px solid #3a2e18;
-    border-radius: 12px;
-    padding: 20px;
-    text-align: center;
-}
-.score-big {
-    font-family: 'Playfair Display', serif;
-    font-size: 64px;
-    font-weight: 700;
-    line-height: 1;
-}
-.grade-badge {
-    display: inline-block;
-    padding: 6px 20px;
-    border-radius: 20px;
-    font-size: 20px;
-    font-weight: 700;
-    margin: 8px 0;
-}
 .section-label {
     font-size: 11px;
     letter-spacing: 3px;
@@ -51,13 +29,7 @@ html, body, [class*="css"] { font-family: 'Source Sans 3', sans-serif; }
     color: #7a6030;
     margin-bottom: 8px;
 }
-.cattle-card {
-    background: #18150e;
-    border: 1px solid #2a2218;
-    border-radius: 10px;
-    padding: 14px;
-    margin-bottom: 8px;
-}
+
 .stTabs [data-baseweb="tab-list"] {
     background-color: #18150e;
     border-radius: 10px;
@@ -75,13 +47,8 @@ div[data-testid="stMetricLabel"] { color: #7a6030; font-size: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── DB Config ────────────────────────────────────────────────────────────────
-DB_CONFIG = {
-    "host":     os.getenv("DB_HOST", "localhost"),
-    "user":     os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", "123"),
-    "database": os.getenv("DB_NAME", "pashuscore"),
-}
+# ── Database File ────────────────────────────────────────────────────────────
+DB_FILE = Path("pashuscore.db")
 
 BREED_WEIGHTS = {
     "Gir": 30, "Sahiwal": 28, "Red Sindhi": 26,
@@ -97,15 +64,129 @@ GRADE_TABLE = [
     (0,  "D",       0,  0.0, "#c0392b"),
 ]
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-@st.cache_resource
-def get_conn():
-    return mysql.connector.connect(**DB_CONFIG)
+# ── SQLite Setup ─────────────────────────────────────────────────────────────
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS farmers (
+            farmer_id   TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            village     TEXT NOT NULL,
+            state       TEXT NOT NULL,
+            land_acres  REAL,
+            phone       TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cattle (
+            cattle_id       TEXT PRIMARY KEY,
+            farmer_id       TEXT NOT NULL,
+            breed           TEXT NOT NULL,
+            age_years       INTEGER,
+            health_status   TEXT DEFAULT 'Healthy',
+            milk_yield_lpd  REAL,
+            ear_tag         TEXT,
+            FOREIGN KEY (farmer_id) REFERENCES farmers(farmer_id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS vaccinations (
+            vacc_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            cattle_id    TEXT NOT NULL,
+            vaccine      TEXT,
+            given_on     TEXT,
+            next_due     TEXT,
+            vet_name     TEXT,
+            FOREIGN KEY (cattle_id) REFERENCES cattle(cattle_id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS loan_applications (
+            app_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            farmer_id         TEXT NOT NULL,
+            credit_score      INTEGER,
+            grade             TEXT,
+            amount_eligible   REAL,
+            status            TEXT DEFAULT 'Pending',
+            applied_on        TEXT DEFAULT (DATE('now')),
+            FOREIGN KEY (farmer_id) REFERENCES farmers(farmer_id)
+        )
+    """)
+
+    # Insert sample data only if empty
+    cur.execute("SELECT COUNT(*) FROM farmers")
+    if cur.fetchone()[0] == 0:
+        cur.executemany("""
+            INSERT INTO farmers (farmer_id, name, village, state, land_acres, phone)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, [
+            ('F001', 'Ramaiah Gowda', 'Hosakere', 'Karnataka', 3.50, '9845001234'),
+            ('F002', 'Sunita Devi', 'Barhaj', 'Uttar Pradesh', 1.20, '9012002345'),
+            ('F003', 'Murugesan P.', 'Palani', 'Tamil Nadu', 0.80, '8023003456'),
+            ('F004', 'Harpreet Kaur', 'Barnala', 'Punjab', 6.00, '9779004567'),
+        ])
+
+        cur.executemany("""
+            INSERT INTO cattle (cattle_id, farmer_id, breed, age_years, health_status, milk_yield_lpd, ear_tag)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, [
+            ('C01','F001','Gir',4,'Healthy',12.0,'KA-4821'),
+            ('C02','F001','Sahiwal',6,'Healthy',10.0,'KA-4822'),
+            ('C03','F001','Gir',3,'Healthy',11.0,'KA-4823'),
+            ('C04','F001','HF Cross',5,'Healthy',9.0,'KA-4824'),
+            ('C05','F002','Murrah Buffalo',5,'Healthy',14.0,'UP-2201'),
+            ('C06','F002','Murrah Buffalo',7,'Mild Fever',6.0,'UP-2202'),
+            ('C07','F002','Nondescript',8,'Healthy',4.0,'UP-2203'),
+            ('C08','F003','Nondescript',10,'Limping',2.0,'TN-0901'),
+            ('C09','F003','Nondescript',9,'Healthy',3.0,'TN-0902'),
+            ('C10','F004','Murrah Buffalo',4,'Healthy',16.0,'PB-7731'),
+            ('C11','F004','Murrah Buffalo',5,'Healthy',15.0,'PB-7732'),
+            ('C12','F004','Murrah Buffalo',3,'Healthy',13.0,'PB-7733'),
+            ('C13','F004','Sahiwal',4,'Healthy',10.0,'PB-7734'),
+            ('C14','F004','HF Cross',6,'Healthy',9.0,'PB-7735'),
+        ])
+
+        cur.executemany("""
+            INSERT INTO vaccinations (cattle_id, vaccine, given_on, next_due, vet_name)
+            VALUES (?, ?, ?, ?, ?)
+        """, [
+            ('C01','FMD + HS','2024-01-10','2025-01-10','Dr. Nagaraj'),
+            ('C02','FMD + HS','2024-01-10','2025-01-10','Dr. Nagaraj'),
+            ('C03','FMD + HS','2024-01-10','2025-01-10','Dr. Nagaraj'),
+            ('C04','FMD + HS','2024-01-10','2025-01-10','Dr. Nagaraj'),
+            ('C05','FMD + BQ','2024-02-14','2025-02-14','Dr. Mishra'),
+            ('C07','FMD','2023-06-01','2024-06-01','Dr. Mishra'),
+            ('C09','FMD','2022-06-01','2023-06-01','Dr. Arumugam'),
+            ('C10','FMD + HS','2024-03-20','2025-03-20','Dr. Gill'),
+            ('C11','FMD + HS','2024-03-20','2025-03-20','Dr. Gill'),
+            ('C12','FMD + HS','2024-03-20','2025-03-20','Dr. Gill'),
+            ('C13','FMD + HS','2024-03-20','2025-03-20','Dr. Gill'),
+            ('C14','FMD + HS','2024-03-20','2025-03-20','Dr. Gill'),
+        ])
+
+        cur.executemany("""
+            INSERT INTO loan_applications (farmer_id, credit_score, grade, amount_eligible, status)
+            VALUES (?, ?, ?, ?, ?)
+        """, [
+            ('F004', 88, 'A+', 200000, 'Approved'),
+            ('F001', 76, 'A', 150000, 'Pending'),
+        ])
+
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
 def run_query(sql, params=None):
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        df = pd.read_sql(sql, conn, params=params)
+        conn = sqlite3.connect(DB_FILE)
+        df = pd.read_sql_query(sql, conn, params=params or ())
         conn.close()
         return df
     except Exception as e:
@@ -114,7 +195,7 @@ def run_query(sql, params=None):
 
 def execute(sql, params=None):
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
+        conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
         cur.execute(sql, params or ())
         conn.commit()
@@ -133,8 +214,8 @@ def compute_score(farmer_id):
                CASE WHEN v.cattle_id IS NOT NULL THEN 1 ELSE 0 END AS vaccinated
         FROM cattle c
         LEFT JOIN vaccinations v
-               ON c.cattle_id = v.cattle_id AND v.next_due >= CURDATE()
-        WHERE c.farmer_id = %s AND c.health_status != 'Deceased'
+               ON c.cattle_id = v.cattle_id AND DATE(v.next_due) >= DATE('now')
+        WHERE c.farmer_id = ? AND c.health_status != 'Deceased'
     """, (farmer_id,))
 
     if df.empty:
@@ -173,8 +254,6 @@ def compute_score(farmer_id):
             "Milk Yield": (yield_score, 10, f"{high_yield} high-yield"),
         },
         "cattle_df": df,
-        "vacc_count": vacc_count,
-        "healthy_count": healthy_count,
     }
 
 def gauge_chart(score, color):
@@ -183,11 +262,7 @@ def gauge_chart(score, color):
         value=score,
         domain={"x": [0, 1], "y": [0, 1]},
         gauge={
-            "axis": {
-                "range": [0, 100],
-                "tickcolor": "#5a4a28",
-                "tickfont": {"color": "#7a6030", "size": 11}
-            },
+            "axis": {"range": [0, 100], "tickcolor": "#5a4a28"},
             "bar": {"color": color, "thickness": 0.25},
             "bgcolor": "#18150e",
             "bordercolor": "#3a2e18",
@@ -198,16 +273,8 @@ def gauge_chart(score, color):
                 {"range": [65, 80], "color": "#0f1a0f"},
                 {"range": [80, 100], "color": "#0a1a0a"},
             ],
-            "threshold": {
-                "line": {"color": color, "width": 4},
-                "thickness": 0.8,
-                "value": score
-            }
         },
-        number={
-            "font": {"color": "#f0c040", "size": 52, "family": "Georgia"},
-            "suffix": "/100"
-        },
+        number={"font": {"color": "#f0c040", "size": 48}, "suffix": "/100"},
         title={"text": "Credit Score", "font": {"color": "#7a6030", "size": 13}}
     ))
     fig.update_layout(
@@ -229,29 +296,23 @@ def breakdown_chart(breakdown):
         x=maxes,
         orientation="h",
         marker_color="#1e1a10",
-        name="Max",
         showlegend=False
     ))
     fig.add_trace(go.Bar(
         y=labels,
         x=scores,
         orientation="h",
-        marker=dict(
-            color=["#f0c040"] * len(scores),
-            line=dict(color="#8b6914", width=1)
-        ),
-        name="Score",
+        marker=dict(color=["#f0c040"] * len(scores)),
         showlegend=False,
         text=[f"{s}/{m}" for s, m in zip(scores, maxes)],
-        textposition="inside",
-        textfont={"color": "#0f0e0c", "size": 12}
+        textposition="inside"
     ))
     fig.update_layout(
         barmode="overlay",
         paper_bgcolor="#18150e",
         plot_bgcolor="#18150e",
         xaxis=dict(showgrid=False, zeroline=False, color="#5a4a28"),
-        yaxis=dict(color="#c0a060", tickfont={"size": 12}),
+        yaxis=dict(color="#c0a060"),
         height=220,
         margin=dict(t=10, b=10, l=10, r=10)
     )
@@ -293,7 +354,6 @@ if page == "🏠 Dashboard":
     if not farmers_base.empty:
         for _, row in farmers_base.iterrows():
             score_data = compute_score(row["farmer_id"])
-
             if score_data:
                 dashboard_rows.append({
                     "farmer_id": row["farmer_id"],
@@ -316,12 +376,11 @@ if page == "🏠 Dashboard":
                 })
 
     df_all = pd.DataFrame(dashboard_rows)
-
     if not df_all.empty:
         df_all = df_all.sort_values("credit_score", ascending=False)
 
     total_cattle = run_query("SELECT COUNT(*) AS n FROM cattle WHERE health_status != 'Deceased'")
-    overdue_vacc = run_query("SELECT COUNT(DISTINCT cattle_id) AS n FROM vaccinations WHERE next_due < CURDATE()")
+    overdue_vacc = run_query("SELECT COUNT(DISTINCT cattle_id) AS n FROM vaccinations WHERE DATE(next_due) < DATE('now')")
     pending_apps = run_query("SELECT COUNT(*) AS n FROM loan_applications WHERE status = 'Pending'")
 
     c1, c2, c3, c4 = st.columns(4)
@@ -336,12 +395,8 @@ if page == "🏠 Dashboard":
     with col1:
         st.markdown("#### 🏆 Farmer Leaderboard")
         if not df_all.empty:
-            grade_colors = {"A+": "🟢", "A": "🟢", "B": "🟡", "C": "🟠", "D": "🔴"}
-            df_display = df_all.copy()
-            df_display["grade"] = df_display["grade"].map(lambda g: f"{grade_colors.get(g, '⚪')} {g}")
-            df_display["credit_score"] = df_display["credit_score"].astype(int)
             st.dataframe(
-                df_display[["name", "village", "state", "herd_size", "credit_score", "grade"]].rename(columns={
+                df_all[["name", "village", "state", "herd_size", "credit_score", "grade"]].rename(columns={
                     "name": "Farmer",
                     "village": "Village",
                     "state": "State",
@@ -360,23 +415,18 @@ if page == "🏠 Dashboard":
         if not df_all.empty:
             grade_counts = df_all["grade"].value_counts().reset_index()
             grade_counts.columns = ["Grade", "Count"]
-            color_map = {"A+": "#2d7a2d", "A": "#4a9e4a", "B": "#d4a017", "C": "#cc6600", "D": "#c0392b"}
             fig_pie = px.pie(
                 grade_counts,
                 names="Grade",
                 values="Count",
-                color="Grade",
-                color_discrete_map=color_map,
                 hole=0.5
             )
             fig_pie.update_layout(
                 paper_bgcolor="#18150e",
                 plot_bgcolor="#18150e",
-                legend=dict(font=dict(color="#c0a060")),
                 height=280,
                 margin=dict(t=10, b=10, l=10, r=10)
             )
-            fig_pie.update_traces(textfont_color="#f0f0f0")
             st.plotly_chart(fig_pie, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -396,7 +446,7 @@ elif page == "📊 Score a Farmer":
 
         if st.button("🔍 Compute Score", type="primary", use_container_width=True):
             result = compute_score(farmer_id)
-            farmer_info = run_query("SELECT * FROM farmers WHERE farmer_id = %s", (farmer_id,))
+            farmer_info = run_query("SELECT * FROM farmers WHERE farmer_id = ?", (farmer_id,))
 
             if result is None:
                 st.error("No active cattle found for this farmer.")
@@ -423,7 +473,7 @@ elif page == "📊 Score a Farmer":
                         fi = farmer_info.iloc[0]
                         st.markdown("---")
                         st.markdown(f"**Village:** {fi['village']}, {fi['state']}")
-                        st.markdown(f"**Land:** {fi['land_acres']} acres &nbsp;|&nbsp; **Animals:** {result['n']}")
+                        st.markdown(f"**Land:** {fi['land_acres']} acres | **Animals:** {result['n']}")
 
                 with col2:
                     st.markdown("#### Score Breakdown")
@@ -431,15 +481,14 @@ elif page == "📊 Score a Farmer":
 
                     st.markdown("#### Herd Details")
                     df_c = result["cattle_df"].copy()
-                    health_icon = {"Healthy": "✅", "Mild Fever": "🟡", "Limping": "🟠", "Critical": "🔴"}
-                    df_c["Health"] = df_c["health_status"].map(lambda h: f"{health_icon.get(h, '⚪')} {h}")
-                    df_c["Vaccinated"] = df_c["vaccinated"].map(lambda v: "💉 Yes" if v else "❌ No")
-                    df_c["Yield (L/day)"] = df_c["milk_yield_lpd"]
+                    df_c["Vaccinated"] = df_c["vaccinated"].map(lambda v: "Yes" if v else "No")
                     st.dataframe(
-                        df_c[["cattle_id", "breed", "age_years", "Health", "Vaccinated", "Yield (L/day)"]].rename(columns={
+                        df_c[["cattle_id", "breed", "age_years", "health_status", "Vaccinated", "milk_yield_lpd"]].rename(columns={
                             "cattle_id": "Tag",
                             "breed": "Breed",
-                            "age_years": "Age"
+                            "age_years": "Age",
+                            "health_status": "Health",
+                            "milk_yield_lpd": "Yield (L/day)"
                         }),
                         use_container_width=True,
                         hide_index=True
@@ -449,26 +498,27 @@ elif page == "📊 Score a Farmer":
                         lid = execute("""
                             INSERT INTO loan_applications
                                 (farmer_id, credit_score, grade, amount_eligible, status)
-                            VALUES (%s, %s, %s, %s, 'Pending')
+                            VALUES (?, ?, ?, ?, 'Pending')
                         """, (farmer_id, result["total"], result["grade"], result["amount"]))
 
                         if lid is not None:
-                            st.success(f"✅ Application #{lid} submitted! Status: Pending")
+                            st.success(f"Application #{lid} submitted! Status: Pending")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE 3 — VILLAGE BATCH SCORE
 # ═══════════════════════════════════════════════════════════════════════════════
 elif page == "🌾 Village Batch Score":
     st.markdown("## 🌾 Village Batch Scoring")
-    st.markdown("Score every farmer in a village at once — for bank loan camps.")
+    st.markdown("Score every farmer in a village at once.")
     st.divider()
 
     villages = run_query("SELECT DISTINCT village FROM farmers ORDER BY village")
-    village = st.selectbox("Select Village", villages["village"].tolist() if not villages.empty else [])
+    village_list = villages["village"].tolist() if not villages.empty else []
+    village = st.selectbox("Select Village", village_list)
 
-    if st.button("🚀 Run Batch Score", type="primary", use_container_width=True):
+    if village and st.button("🚀 Run Batch Score", type="primary", use_container_width=True):
         farmers_in_village = run_query(
-            "SELECT farmer_id, name FROM farmers WHERE village = %s", (village,)
+            "SELECT farmer_id, name FROM farmers WHERE village = ?", (village,)
         )
         if farmers_in_village.empty:
             st.warning("No farmers found.")
@@ -492,9 +542,7 @@ elif page == "🌾 Village Batch Score":
 
             if results:
                 df_res = pd.DataFrame(results).sort_values("Score", ascending=False)
-
-                st.success(f"✅ Scored {len(df_res)} farmers in **{village}**")
-                st.divider()
+                st.success(f"Scored {len(df_res)} farmers in {village}")
 
                 c1, c2, c3 = st.columns(3)
                 eligible = df_res[df_res["Grade"].isin(["A+", "A", "B"])]["Max Loan"].count()
@@ -504,28 +552,9 @@ elif page == "🌾 Village Batch Score":
 
                 st.dataframe(df_res, use_container_width=True, hide_index=True)
 
-                fig = px.bar(
-                    df_res,
-                    x="Farmer",
-                    y="Score",
-                    color="Grade",
-                    color_discrete_map={
-                        "A+": "#2d7a2d",
-                        "A": "#4a9e4a",
-                        "B": "#d4a017",
-                        "C": "#cc6600",
-                        "D": "#c0392b"
-                    },
-                    title=f"Credit Scores — {village}"
-                )
-                fig.update_layout(
-                    paper_bgcolor="#18150e",
-                    plot_bgcolor="#18150e",
-                    font=dict(color="#c0a060")
-                )
+                fig = px.bar(df_res, x="Farmer", y="Score", color="Grade", title=f"Credit Scores — {village}")
+                fig.update_layout(paper_bgcolor="#18150e", plot_bgcolor="#18150e")
                 st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("No active cattle found for farmers in this village.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE 4 — CATTLE REGISTRY
@@ -538,27 +567,15 @@ elif page == "🐄 Cattle Registry":
         SELECT c.cattle_id, f.name AS farmer, f.village,
                c.breed, c.age_years, c.health_status,
                c.milk_yield_lpd, c.ear_tag,
-               CASE WHEN v.cattle_id IS NOT NULL THEN '💉 Vaccinated' ELSE '❌ Pending' END AS vacc_status
+               CASE WHEN v.cattle_id IS NOT NULL THEN 'Vaccinated' ELSE 'Pending' END AS vacc_status
         FROM cattle c
         JOIN farmers f ON c.farmer_id = f.farmer_id
-        LEFT JOIN vaccinations v ON c.cattle_id = v.cattle_id AND v.next_due >= CURDATE()
+        LEFT JOIN vaccinations v ON c.cattle_id = v.cattle_id AND DATE(v.next_due) >= DATE('now')
         ORDER BY f.name, c.breed
     """)
 
     if not df.empty:
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            breed_filter = st.multiselect("Filter by Breed", sorted(df["breed"].unique()))
-        with col2:
-            health_filter = st.multiselect("Filter by Health", sorted(df["health_status"].unique()))
-
-        if breed_filter:
-            df = df[df["breed"].isin(breed_filter)]
-        if health_filter:
-            df = df[df["health_status"].isin(health_filter)]
-
         st.dataframe(df, use_container_width=True, hide_index=True)
-        st.caption(f"{len(df)} animals shown")
 
         st.divider()
         st.markdown("#### Update Health Status")
@@ -571,10 +588,7 @@ elif page == "🐄 Cattle Registry":
             st.write("")
             st.write("")
             if st.button("✅ Update", use_container_width=True):
-                execute(
-                    "UPDATE cattle SET health_status = %s WHERE cattle_id = %s",
-                    (new_health, cattle_id)
-                )
+                execute("UPDATE cattle SET health_status = ? WHERE cattle_id = ?", (new_health, cattle_id))
                 st.success(f"Updated {cattle_id} → {new_health}")
                 st.rerun()
     else:
@@ -591,56 +605,22 @@ elif page == "💉 Vaccination Alerts":
         SELECT c.cattle_id, c.ear_tag, c.breed,
                f.name AS farmer, f.phone, f.village,
                v.vaccine, v.next_due,
-               DATEDIFF(CURDATE(), v.next_due) AS days_overdue
+               CAST((julianday('now') - julianday(v.next_due)) AS INTEGER) AS days_overdue
         FROM vaccinations v
         JOIN cattle c ON v.cattle_id = c.cattle_id
         JOIN farmers f ON c.farmer_id = f.farmer_id
-        WHERE v.next_due < CURDATE()
+        WHERE DATE(v.next_due) < DATE('now')
         ORDER BY days_overdue DESC
     """)
 
     if df.empty:
-        st.success("✅ All vaccinations are up to date!")
+        st.success("All vaccinations are up to date!")
     else:
-        st.error(f"⚠️ {len(df)} cattle have overdue vaccinations")
+        st.error(f"{len(df)} cattle have overdue vaccinations")
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-        def severity(days):
-            if days > 180:
-                return "🔴 Critical"
-            if days > 90:
-                return "🟠 High"
-            return "🟡 Moderate"
-
-        df["Severity"] = df["days_overdue"].apply(severity)
-        st.dataframe(df.rename(columns={
-            "cattle_id": "Cattle ID",
-            "ear_tag": "Tag",
-            "breed": "Breed",
-            "farmer": "Farmer",
-            "phone": "Phone",
-            "village": "Village",
-            "vaccine": "Vaccine",
-            "next_due": "Due Date",
-            "days_overdue": "Days Overdue"
-        }), use_container_width=True, hide_index=True)
-
-        fig = px.bar(
-            df.head(10),
-            x="cattle_id",
-            y="days_overdue",
-            color="Severity",
-            color_discrete_map={
-                "🔴 Critical": "#c0392b",
-                "🟠 High": "#cc6600",
-                "🟡 Moderate": "#d4a017"
-            },
-            title="Top 10 Most Overdue"
-        )
-        fig.update_layout(
-            paper_bgcolor="#18150e",
-            plot_bgcolor="#18150e",
-            font=dict(color="#c0a060")
-        )
+        fig = px.bar(df.head(10), x="cattle_id", y="days_overdue", title="Top 10 Most Overdue")
+        fig.update_layout(paper_bgcolor="#18150e", plot_bgcolor="#18150e")
         st.plotly_chart(fig, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -657,58 +637,40 @@ elif page == "🏦 Loan Applications":
                la.status, la.applied_on
         FROM loan_applications la
         JOIN farmers f ON la.farmer_id = f.farmer_id
-        ORDER BY la.applied_on DESC
+        ORDER BY la.applied_on DESC, la.app_id DESC
     """)
 
     if df.empty:
-        st.info("No loan applications yet. Score a farmer and apply.")
+        st.info("No loan applications yet.")
     else:
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Applications", len(df))
         c2.metric("Approved", len(df[df["status"] == "Approved"]))
         c3.metric("Pending Review", len(df[df["status"] == "Pending"]))
 
-        st.divider()
-        status_filter = st.selectbox("Filter by Status", ["All", "Pending", "Approved", "Rejected"])
-        if status_filter != "All":
-            df = df[df["status"] == status_filter]
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-        st.dataframe(df.rename(columns={
-            "app_id": "App #",
-            "name": "Farmer",
-            "village": "Village",
-            "state": "State",
-            "credit_score": "Score",
-            "grade": "Grade",
-            "amount_eligible": "Eligible (₹)",
-            "status": "Status",
-            "applied_on": "Applied On"
-        }), use_container_width=True, hide_index=True)
-
-        st.divider()
-        st.markdown("#### Quick Decision")
-        app_ids = df[df["status"] == "Pending"]["app_id"].tolist() if "app_id" in df.columns else []
-
-        if app_ids:
+        pending_df = df[df["status"] == "Pending"]
+        if not pending_df.empty:
+            st.divider()
+            st.markdown("#### Quick Decision")
             dc1, dc2, dc3 = st.columns(3)
             with dc1:
-                sel_app = st.selectbox("Pending App #", app_ids)
+                sel_app = st.selectbox("Pending App #", pending_df["app_id"].tolist())
             with dc2:
                 st.write("")
                 st.write("")
                 if st.button("✅ Approve", use_container_width=True):
-                    execute("UPDATE loan_applications SET status='Approved' WHERE app_id=%s", (sel_app,))
+                    execute("UPDATE loan_applications SET status='Approved' WHERE app_id=?", (sel_app,))
                     st.success(f"App #{sel_app} Approved!")
                     st.rerun()
             with dc3:
                 st.write("")
                 st.write("")
                 if st.button("❌ Reject", use_container_width=True):
-                    execute("UPDATE loan_applications SET status='Rejected' WHERE app_id=%s", (sel_app,))
+                    execute("UPDATE loan_applications SET status='Rejected' WHERE app_id=?", (sel_app,))
                     st.warning(f"App #{sel_app} Rejected.")
                     st.rerun()
-        else:
-            st.info("No pending applications.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE 7 — ADD FARMER / CATTLE
@@ -728,7 +690,7 @@ elif page == "➕ Add Farmer / Cattle":
             state = c2.text_input("State")
             land = c1.number_input("Land (acres)", 0.0, 100.0, 1.0, 0.1)
             phone = c2.text_input("Phone")
-            submitted = st.form_submit_button("✅ Register Farmer", use_container_width=True)
+            submitted = st.form_submit_button("Register Farmer", use_container_width=True)
 
             if submitted:
                 if not all([farmer_id, name, village, state]):
@@ -736,9 +698,9 @@ elif page == "➕ Add Farmer / Cattle":
                 else:
                     execute("""
                         INSERT INTO farmers (farmer_id, name, village, state, land_acres, phone)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        VALUES (?, ?, ?, ?, ?, ?)
                     """, (farmer_id, name, village, state, land, phone))
-                    st.success(f"✅ Farmer {name} registered as {farmer_id}")
+                    st.success(f"Farmer {name} registered as {farmer_id}")
 
     with tab2:
         farmers_df = run_query("SELECT farmer_id, name FROM farmers ORDER BY name")
@@ -749,22 +711,22 @@ elif page == "➕ Add Farmer / Cattle":
 
         with st.form("add_cattle"):
             c1, c2 = st.columns(2)
-            farmer_sel = c1.selectbox("Farmer", list(farmer_map.keys()))
+            farmer_sel = c1.selectbox("Farmer", list(farmer_map.keys()) if farmer_map else [])
             cattle_id = c2.text_input("Cattle ID (e.g. C15)")
             breed = c1.selectbox("Breed", list(BREED_WEIGHTS.keys()))
             age = c2.number_input("Age (years)", 1, 20, 3)
             yield_lpd = c1.number_input("Milk Yield (L/day)", 0.0, 50.0, 5.0, 0.5)
             ear_tag = c2.text_input("Ear Tag")
-            submitted = st.form_submit_button("✅ Register Cattle", use_container_width=True)
+            submitted = st.form_submit_button("Register Cattle", use_container_width=True)
 
-            if submitted:
+            if submitted and farmer_sel:
                 fid = farmer_map.get(farmer_sel, "")
                 execute("""
                     INSERT INTO cattle
                         (cattle_id, farmer_id, breed, age_years, health_status, milk_yield_lpd, ear_tag)
-                    VALUES (%s, %s, %s, %s, 'Healthy', %s, %s)
+                    VALUES (?, ?, ?, ?, 'Healthy', ?, ?)
                 """, (cattle_id, fid, breed, age, yield_lpd, ear_tag))
-                st.success(f"✅ Cattle {cattle_id} ({breed}) registered under {farmer_sel}")
+                st.success(f"Cattle {cattle_id} ({breed}) registered under {farmer_sel}")
 
     with tab3:
         all_cattle = run_query("SELECT cattle_id FROM cattle WHERE health_status != 'Deceased'")
@@ -775,11 +737,11 @@ elif page == "➕ Add Farmer / Cattle":
             given = c1.date_input("Date Given", value=date.today())
             due = c2.date_input("Next Due Date")
             vet = c1.text_input("Vet Name")
-            submitted = st.form_submit_button("✅ Add Record", use_container_width=True)
+            submitted = st.form_submit_button("Add Record", use_container_width=True)
 
-            if submitted:
+            if submitted and cid:
                 execute("""
                     INSERT INTO vaccinations (cattle_id, vaccine, given_on, next_due, vet_name)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (cid, vaccine, given, due, vet))
-                st.success(f"✅ Vaccination recorded for {cid}")
+                    VALUES (?, ?, ?, ?, ?)
+                """, (cid, vaccine, str(given), str(due), vet))
+                st.success(f"Vaccination recorded for {cid}")
